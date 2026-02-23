@@ -1,0 +1,20 @@
+{
+  "name": "unraid-vault-sync-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obsidian community plugin for syncing notes via a self-hosted backend",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.15",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.23.1",
+    "obsidian": "latest",
+    "tslib": "^2.7.0",
+    "typescript": "^5.5.4"
+  }
+}

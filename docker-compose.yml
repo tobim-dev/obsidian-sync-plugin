@@ -1,0 +1,15 @@
+services:
+  obsidian-sync-backend:
+    build:
+      context: ./backend
+    container_name: obsidian-sync-backend
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      - PORT=8787
+      - DB_PATH=/data/sync.db
+      - SYNC_TOKEN=tZYeZf4rzJZc9A4b6fZ2w9
+      - MAX_BODY_SIZE=50mb
+    volumes:
+      - ./data:/data

@@ -1,0 +1,9 @@
+{
+  "id": "unraid-vault-sync",
+  "name": "Unraid Vault Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Manual sync for Obsidian notes using a self-hosted Docker backend.",
+  "author": "Tobias",
+  "isDesktopOnly": false
+}
