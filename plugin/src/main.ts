@@ -77,6 +77,10 @@ interface ApplyResult {
 	skipped: number;
 }
 
+interface SyncRunOptions {
+	forceFullUpload?: boolean;
+}
+
 const DEFAULT_SETTINGS: SyncSettings = {
 	serverUrl: "http://127.0.0.1:8787",
 	apiToken: "",
@@ -105,9 +109,17 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 				await this.runSync();
 			},
 		});
+
+		this.addCommand({
+			id: "force-full-sync",
+			name: "Force full sync (re-upload local vault)",
+			callback: async () => {
+				await this.runSync({ forceFullUpload: true });
+			},
+		});
 	}
 
-	public async runSync(): Promise<void> {
+	public async runSync(options: SyncRunOptions = {}): Promise<void> {
 		if (this.syncInProgress) {
 			new Notice("Sync is already running.");
 			return;
@@ -130,30 +142,51 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 
 		this.syncInProgress = true;
 		const syncStartedAt = Date.now();
-		new Notice("Vault sync started...");
+		const forceFullUpload = options.forceFullUpload === true;
+		new Notice(forceFullUpload ? "Force sync started..." : "Vault sync started...");
 
 		try {
-			const snapshot = await this.buildSnapshot();
+			const snapshot = await this.buildSnapshot(forceFullUpload);
+			const requestLastServerSeq = forceFullUpload ? 0 : this.state.lastServerSeq;
 			const request: SyncRequest = {
 				vaultId: this.settings.vaultId.trim(),
 				deviceId: this.state.deviceId,
-				lastServerSeq: this.state.lastServerSeq,
+				lastServerSeq: requestLastServerSeq,
 				changes: snapshot.localChanges,
 			};
 
-			const response = await this.pushAndPull(request);
+			let response = await this.pushAndPull(request);
+			let snapshotToApply = snapshot;
+
+			if (
+				!forceFullUpload &&
+				(
+					this.didServerHistoryReset(request.lastServerSeq, response.serverSeq) ||
+					this.didServerAppearEmptyWithOnlyCachedState(request, response, snapshot)
+				)
+			) {
+				new Notice("Server reset detected. Re-uploading local vault...");
+				snapshotToApply = await this.buildSnapshot(true);
+				response = await this.pushAndPull({
+					vaultId: request.vaultId,
+					deviceId: request.deviceId,
+					lastServerSeq: 0,
+					changes: snapshotToApply.localChanges,
+				});
+			}
+
 			const applyResult = await this.applyRemoteChanges(
 				response.changes,
-				snapshot.entries,
+				snapshotToApply.entries,
 				syncStartedAt,
 			);
 
-			this.state.entries = snapshot.entries;
+			this.state.entries = snapshotToApply.entries;
 			this.state.lastServerSeq = response.serverSeq;
 			await this.persistData();
 
 			new Notice(
-				`Sync complete. Uploaded ${snapshot.localChanges.length} change(s), downloaded ${applyResult.appliedUpserts + applyResult.appliedDeletes} change(s).`,
+				`Sync complete. Uploaded ${snapshotToApply.localChanges.length} change(s), downloaded ${applyResult.appliedUpserts + applyResult.appliedDeletes} change(s).`,
 			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -164,14 +197,33 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 		}
 	}
 
-		public async testServerConnection(): Promise<void> {
-			const baseUrl = this.cleanBaseUrl();
-			try {
-				const response = await requestUrl({
-					url: `${baseUrl}/health`,
-					method: "GET",
-					throw: false,
-				});
+	private didServerHistoryReset(lastKnownSeq: number, currentServerSeq: number): boolean {
+		return lastKnownSeq > 0 && currentServerSeq < lastKnownSeq;
+	}
+
+	private didServerAppearEmptyWithOnlyCachedState(
+		request: SyncRequest,
+		response: SyncResponse,
+		snapshot: SnapshotResult,
+	): boolean {
+		return (
+			Object.keys(this.state.entries).length > 0 &&
+			Object.keys(snapshot.entries).length > 0 &&
+			snapshot.localChanges.length === 0 &&
+			request.lastServerSeq === 0 &&
+			response.serverSeq === 0 &&
+			response.changes.length === 0
+		);
+	}
+
+	public async testServerConnection(): Promise<void> {
+		const baseUrl = this.cleanBaseUrl();
+		try {
+			const response = await requestUrl({
+				url: `${baseUrl}/health`,
+				method: "GET",
+				throw: false,
+			});
 
 			if (response.status >= 400) {
 				new Notice(`Healthcheck failed: ${response.status}`);
@@ -284,7 +336,7 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 		return extensions.has(ext);
 	}
 
-	private async buildSnapshot(): Promise<SnapshotResult> {
+	private async buildSnapshot(forceFullUpload = false): Promise<SnapshotResult> {
 		const extensions = this.parseExtensions();
 		const localChanges: SyncChange[] = [];
 		const nextEntries: Record<string, LocalEntry> = {};
@@ -297,7 +349,7 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			}
 
 			const path = normalizePath(file.path);
-			const previous = previousEntries[path];
+			const previous = forceFullUpload ? undefined : previousEntries[path];
 
 			if (previous && previous.mtime === file.stat.mtime && previous.size === file.stat.size) {
 				nextEntries[path] = previous;
@@ -314,7 +366,7 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			};
 			nextEntries[path] = entry;
 
-			if (!previous || previous.hash !== hash || previous.mtime !== file.stat.mtime || previous.size !== file.stat.size) {
+			if (forceFullUpload || !previous || previous.hash !== hash || previous.mtime !== file.stat.mtime || previous.size !== file.stat.size) {
 				localChanges.push({
 					op: "upsert",
 					path,
@@ -325,17 +377,19 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			}
 		}
 
-		const deleteTimestamp = Date.now();
-		for (const previousPath of Object.keys(previousEntries)) {
-			if (nextEntries[previousPath]) {
-				continue;
-			}
+		if (!forceFullUpload) {
+			const deleteTimestamp = Date.now();
+			for (const previousPath of Object.keys(previousEntries)) {
+				if (nextEntries[previousPath]) {
+					continue;
+				}
 
-			localChanges.push({
-				op: "delete",
-				path: previousPath,
-				mtime: deleteTimestamp,
-			});
+				localChanges.push({
+					op: "delete",
+					path: previousPath,
+					mtime: deleteTimestamp,
+				});
+			}
 		}
 
 		return {
@@ -581,10 +635,15 @@ class UnraidVaultSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync controls")
-			.setDesc("Use command palette action: Sync notes with self-hosted backend.")
+			.setDesc("Use command palette actions for normal sync and force full re-upload.")
 			.addButton((button) =>
 				button.setButtonText("Sync now").onClick(async () => {
 					await this.plugin.runSync();
+				}),
+			)
+			.addButton((button) =>
+				button.setButtonText("Force sync").onClick(async () => {
+					await this.plugin.runSync({ forceFullUpload: true });
 				}),
 			)
 			.addButton((button) =>

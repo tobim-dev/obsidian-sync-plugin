@@ -77,8 +77,11 @@ In `Settings -> Unraid Vault Sync`:
 
 Open command palette and run:
 - `Sync notes with self-hosted backend`
+- `Force full sync (re-upload local vault)` (use this after backend resets/migrations)
 
 This uploads local changes and downloads remote changes (including deletes).
+
+If the backend sequence history drops (for example, new empty DB after moving servers), the plugin now auto-detects that condition and performs a full re-upload.
 
 ## Mobile and resource usage
 - No background polling loop.
