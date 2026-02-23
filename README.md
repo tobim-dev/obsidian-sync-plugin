@@ -117,7 +117,7 @@ It does the following:
 - Builds and pushes a Docker image to GitHub Container Registry on `main`, tags (`v*`), and manual runs.
 
 Published image name:
-- `ghcr.io/<github-owner>/obsidian-sync-backend`
+- `ghcr.io/<github-owner>/<github-repo>-backend`
 
 Required repository setting:
 - `Settings -> Actions -> General -> Workflow permissions -> Read and write permissions`
