@@ -72,6 +72,10 @@ In `Settings -> Unraid Vault Sync`:
 - `API token`: same token as `SYNC_TOKEN`
 - `Vault ID`: same value on all devices for this vault (for example `main-notes`)
 - `Extensions`: default `.md` (or `*` for all file types)
+- `Auto sync on startup`: run once after app startup
+- `Auto sync on app resume`: run when app comes to foreground
+- `Periodic auto sync`: schedule sync while app stays open
+- `Auto sync interval`: default 10 minutes
 
 ## 5) Use sync command
 
@@ -84,10 +88,9 @@ This uploads local changes and downloads remote changes (including deletes).
 If the backend sequence history drops (for example, new empty DB after moving servers), the plugin now auto-detects that condition and performs a full re-upload.
 
 ## Mobile and resource usage
-- No background polling loop.
 - No file watcher loops.
 - Diffing uses `mtime + size` first, only hashing file content when needed.
-- Sync runs only when you trigger the command.
+- Auto sync is event-driven (startup/resume) and optional periodic.
 
 ## Current conflict behavior
 - Last synced update wins (event sequence order on server).

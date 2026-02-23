@@ -16,6 +16,10 @@ interface SyncSettings {
 	apiToken: string;
 	vaultId: string;
 	includeExtensions: string;
+	autoSyncOnStartup: boolean;
+	autoSyncOnAppResume: boolean;
+	autoSyncIntervalEnabled: boolean;
+	autoSyncIntervalMinutes: number;
 }
 
 interface LocalEntry {
@@ -79,6 +83,8 @@ interface ApplyResult {
 
 interface SyncRunOptions {
 	forceFullUpload?: boolean;
+	silentIfNotConfigured?: boolean;
+	showNotices?: boolean;
 }
 
 const DEFAULT_SETTINGS: SyncSettings = {
@@ -86,12 +92,18 @@ const DEFAULT_SETTINGS: SyncSettings = {
 	apiToken: "",
 	vaultId: "",
 	includeExtensions: ".md",
+	autoSyncOnStartup: true,
+	autoSyncOnAppResume: true,
+	autoSyncIntervalEnabled: true,
+	autoSyncIntervalMinutes: 10,
 };
 
 export default class UnraidVaultSyncPlugin extends Plugin {
 	private settings: SyncSettings = { ...DEFAULT_SETTINGS };
 	private state: SyncState = this.createDefaultState();
 	private syncInProgress = false;
+	private autoSyncIntervalHandle: number | null = null;
+	private lastAutoSyncAt = 0;
 
 	public async onload(): Promise<void> {
 		await this.loadPluginData();
@@ -117,33 +129,47 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 				await this.runSync({ forceFullUpload: true });
 			},
 		});
+
+		this.registerAutoSyncHandlers();
 	}
 
 	public async runSync(options: SyncRunOptions = {}): Promise<void> {
+		const showNotices = options.showNotices !== false;
+
 		if (this.syncInProgress) {
-			new Notice("Sync is already running.");
+			if (showNotices) {
+				new Notice("Sync is already running.");
+			}
 			return;
 		}
 
 		if (!this.settings.serverUrl.trim()) {
-			new Notice("Set the sync server URL in plugin settings.");
+			if (!options.silentIfNotConfigured && showNotices) {
+				new Notice("Set the sync server URL in plugin settings.");
+			}
 			return;
 		}
 
 		if (!this.settings.apiToken.trim()) {
-			new Notice("Set the sync API token in plugin settings.");
+			if (!options.silentIfNotConfigured && showNotices) {
+				new Notice("Set the sync API token in plugin settings.");
+			}
 			return;
 		}
 
 		if (!this.settings.vaultId.trim()) {
-			new Notice("Set a shared vault ID in plugin settings.");
+			if (!options.silentIfNotConfigured && showNotices) {
+				new Notice("Set a shared vault ID in plugin settings.");
+			}
 			return;
 		}
 
 		this.syncInProgress = true;
 		const syncStartedAt = Date.now();
 		const forceFullUpload = options.forceFullUpload === true;
-		new Notice(forceFullUpload ? "Force sync started..." : "Vault sync started...");
+		if (showNotices) {
+			new Notice(forceFullUpload ? "Force sync started..." : "Vault sync started...");
+		}
 
 		try {
 			const snapshot = await this.buildSnapshot(forceFullUpload);
@@ -165,7 +191,9 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 					this.didServerAppearEmptyWithOnlyCachedState(request, response, snapshot)
 				)
 			) {
-				new Notice("Server reset detected. Re-uploading local vault...");
+				if (showNotices) {
+					new Notice("Server reset detected. Re-uploading local vault...");
+				}
 				snapshotToApply = await this.buildSnapshot(true);
 				response = await this.pushAndPull({
 					vaultId: request.vaultId,
@@ -185,12 +213,16 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			this.state.lastServerSeq = response.serverSeq;
 			await this.persistData();
 
-			new Notice(
-				`Sync complete. Uploaded ${snapshotToApply.localChanges.length} change(s), downloaded ${applyResult.appliedUpserts + applyResult.appliedDeletes} change(s).`,
-			);
+			if (showNotices) {
+				new Notice(
+					`Sync complete. Uploaded ${snapshotToApply.localChanges.length} change(s), downloaded ${applyResult.appliedUpserts + applyResult.appliedDeletes} change(s).`,
+				);
+			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			new Notice(`Sync failed: ${message}`);
+			if (showNotices) {
+				new Notice(`Sync failed: ${message}`);
+			}
 			console.error("[unraid-vault-sync] sync failed", error);
 		} finally {
 			this.syncInProgress = false;
@@ -214,6 +246,90 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			response.serverSeq === 0 &&
 			response.changes.length === 0
 		);
+	}
+
+	private registerAutoSyncHandlers(): void {
+		this.register(() => {
+			this.clearAutoSyncInterval();
+		});
+
+		this.app.workspace.onLayoutReady(() => {
+			this.refreshAutoSyncInterval();
+			if (this.settings.autoSyncOnStartup) {
+				this.triggerAutoSync();
+			}
+		});
+
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState !== "visible") {
+				return;
+			}
+			if (!this.settings.autoSyncOnAppResume) {
+				return;
+			}
+			this.triggerAutoSync();
+		});
+
+		this.registerDomEvent(window, "focus", () => {
+			if (!this.settings.autoSyncOnAppResume) {
+				return;
+			}
+			this.triggerAutoSync();
+		});
+	}
+
+	private triggerAutoSync(): void {
+		if (!this.app.workspace.layoutReady || !this.isSyncConfigured()) {
+			return;
+		}
+
+		const now = Date.now();
+		if (now - this.lastAutoSyncAt < 30_000) {
+			return;
+		}
+
+		this.lastAutoSyncAt = now;
+		void this.runSync({
+			silentIfNotConfigured: true,
+			showNotices: false,
+		});
+	}
+
+	private isSyncConfigured(): boolean {
+		return Boolean(
+			this.settings.serverUrl.trim() &&
+			this.settings.apiToken.trim() &&
+			this.settings.vaultId.trim(),
+		);
+	}
+
+	private refreshAutoSyncInterval(): void {
+		this.clearAutoSyncInterval();
+		if (!this.settings.autoSyncIntervalEnabled) {
+			return;
+		}
+
+		const minutes = this.normalizeAutoSyncIntervalMinutes(this.settings.autoSyncIntervalMinutes);
+		this.autoSyncIntervalHandle = window.setInterval(() => {
+			this.triggerAutoSync();
+		}, minutes * 60_000);
+	}
+
+	private clearAutoSyncInterval(): void {
+		if (this.autoSyncIntervalHandle === null) {
+			return;
+		}
+
+		window.clearInterval(this.autoSyncIntervalHandle);
+		this.autoSyncIntervalHandle = null;
+	}
+
+	private normalizeAutoSyncIntervalMinutes(value: number): number {
+		if (!Number.isFinite(value)) {
+			return DEFAULT_SETTINGS.autoSyncIntervalMinutes;
+		}
+
+		return Math.max(1, Math.floor(value));
 	}
 
 	public async testServerConnection(): Promise<void> {
@@ -246,7 +362,11 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			...this.settings,
 			...patch,
 		};
+		this.settings.autoSyncIntervalMinutes = this.normalizeAutoSyncIntervalMinutes(
+			this.settings.autoSyncIntervalMinutes,
+		);
 		await this.persistData();
+		this.refreshAutoSyncInterval();
 	}
 
 	private async loadPluginData(): Promise<void> {
@@ -255,6 +375,9 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			...DEFAULT_SETTINGS,
 			...(raw?.settings ?? {}),
 		};
+		this.settings.autoSyncIntervalMinutes = this.normalizeAutoSyncIntervalMinutes(
+			this.settings.autoSyncIntervalMinutes,
+		);
 
 		this.state = {
 			...this.createDefaultState(),
@@ -630,6 +753,55 @@ class UnraidVaultSyncSettingTab extends PluginSettingTab {
 					.setValue(settings.includeExtensions)
 					.onChange(async (value) => {
 						await this.plugin.updateSettings({ includeExtensions: value.trim() });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Auto sync on startup")
+			.setDesc("Run a sync automatically when Obsidian starts and layout is ready.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(settings.autoSyncOnStartup)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({ autoSyncOnStartup: value });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Auto sync on app resume")
+			.setDesc("Run sync when the app comes back to the foreground/focus.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(settings.autoSyncOnAppResume)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({ autoSyncOnAppResume: value });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Periodic auto sync")
+			.setDesc("Enable scheduled sync while the app is open.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(settings.autoSyncIntervalEnabled)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({ autoSyncIntervalEnabled: value });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Auto sync interval (minutes)")
+			.setDesc("Default 10 minutes. Minimum 1 minute.")
+			.addText((text) =>
+				text
+					.setPlaceholder("10")
+					.setValue(String(settings.autoSyncIntervalMinutes))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (!Number.isFinite(parsed)) {
+							return;
+						}
+						await this.plugin.updateSettings({ autoSyncIntervalMinutes: parsed });
 					}),
 			);
 
