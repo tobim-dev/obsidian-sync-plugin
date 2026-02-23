@@ -1,0 +1,71 @@
+name: Release Plugin Artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (for example v0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  release-plugin:
+    name: Build and Release Plugin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: vars
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+
+      - name: Install dependencies
+        working-directory: plugin
+        run: npm ci
+
+      - name: Type check
+        working-directory: plugin
+        run: npm run check
+
+      - name: Build plugin
+        working-directory: plugin
+        run: npm run build
+
+      - name: Package release files
+        run: |
+          mkdir -p release/unraid-vault-sync
+          cp plugin/main.js release/unraid-vault-sync/main.js
+          cp plugin/manifest.json release/unraid-vault-sync/manifest.json
+          cp plugin/versions.json release/unraid-vault-sync/versions.json
+          (cd release && zip -r "unraid-vault-sync-${{ steps.vars.outputs.tag }}.zip" unraid-vault-sync)
+
+      - name: Create GitHub release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
+          generate_release_notes: true
+          files: |
+            release/unraid-vault-sync-${{ steps.vars.outputs.tag }}.zip
+            release/unraid-vault-sync/main.js
+            release/unraid-vault-sync/manifest.json
+            release/unraid-vault-sync/versions.json

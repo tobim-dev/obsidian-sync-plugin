@@ -110,11 +110,13 @@ git commit -m "Initial self-hosted Obsidian sync plugin and backend"
 ## GitHub Actions and GHCR
 Workflow file:
 - `.github/workflows/ci-ghcr.yml`
+- `.github/workflows/release-plugin.yml`
 
 It does the following:
 - Builds and type-checks the Obsidian plugin.
 - Builds the backend TypeScript project.
 - Builds and pushes a Docker image to GitHub Container Registry on `main`, tags (`v*`), and manual runs.
+- Builds plugin release artifacts and uploads them to GitHub Releases on tags (`v*`) and manual runs.
 
 Published image name:
 - `ghcr.io/<github-owner>/<github-repo>-backend`
@@ -137,3 +139,16 @@ If you prefer HTTPS instead of SSH:
 git remote add origin https://github.com/<your-user-or-org>/<your-repo>.git
 git push -u origin main
 ```
+
+## Create a plugin release
+After pushing `main`, create and push a version tag:
+
+```bash
+cd /Users/tobias/Projects/obsidian_sync
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+This triggers:
+- Docker publish (`ci-ghcr.yml`)
+- Plugin release assets upload (`release-plugin.yml`)
