@@ -13,7 +13,7 @@ This repository contains:
 - Each client sends local changes (`upsert` / `delete`) and requests remote changes since its last sync sequence.
 - Server stores an append-only event sequence and returns new events.
 - Plugin applies remote changes and updates local sync state.
-- `.obsidian/` content is intentionally excluded for safety.
+- `.obsidian/` is excluded by default, except optional community-plugin syncing (`.obsidian/plugins/*` + `.obsidian/community-plugins.json`).
 
 ## 1) Run backend on Unraid
 
@@ -72,6 +72,7 @@ In `Settings -> Unraid Vault Sync`:
 - `API token`: same token as `SYNC_TOKEN`
 - `Vault ID`: same value on all devices for this vault (for example `main-notes`)
 - `Extensions`: default `.md` (or `*` for all file types)
+- `Sync community plugins`: sync `.obsidian/plugins/*` and `.obsidian/community-plugins.json`
 - `Auto sync on startup`: run once after app startup
 - `Auto sync on app resume`: run when app comes to foreground
 - `Periodic auto sync`: schedule sync while app stays open

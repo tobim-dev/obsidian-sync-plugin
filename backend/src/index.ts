@@ -263,11 +263,19 @@ function normalizeVaultPath(input: string): string | null {
     }
   }
 
-  if (normalized.startsWith(".obsidian/")) {
+  if (normalized.startsWith(".obsidian/") && !isAllowedObsidianPath(normalized)) {
     return null;
   }
 
   return normalized;
+}
+
+function isAllowedObsidianPath(normalized: string): boolean {
+  if (normalized === ".obsidian/community-plugins.json") {
+    return true;
+  }
+
+  return normalized.startsWith(".obsidian/plugins/");
 }
 
 function parsePayload(value: unknown): { ok: true; payload: SyncPayload } | { ok: false; error: string } {

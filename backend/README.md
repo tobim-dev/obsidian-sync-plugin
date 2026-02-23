@@ -1,6 +1,7 @@
 # Obsidian Sync Backend
 
 Lightweight Express + SQLite backend for the `unraid-vault-sync` Obsidian plugin.
+Accepts regular vault files and the safe community-plugin subset under `.obsidian/`.
 
 ## Environment
 - `PORT` (default `8787`)

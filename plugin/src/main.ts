@@ -16,6 +16,7 @@ interface SyncSettings {
 	apiToken: string;
 	vaultId: string;
 	includeExtensions: string;
+	syncCommunityPlugins: boolean;
 	autoSyncOnStartup: boolean;
 	autoSyncOnAppResume: boolean;
 	autoSyncIntervalEnabled: boolean;
@@ -92,6 +93,7 @@ const DEFAULT_SETTINGS: SyncSettings = {
 	apiToken: "",
 	vaultId: "",
 	includeExtensions: ".md",
+	syncCommunityPlugins: true,
 	autoSyncOnStartup: true,
 	autoSyncOnAppResume: true,
 	autoSyncIntervalEnabled: true,
@@ -446,8 +448,25 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 		return extensions;
 	}
 
-	private shouldIncludeFile(file: TFile, extensions: Set<string>): boolean {
-		if (file.path.startsWith(`${this.app.vault.configDir}/`)) {
+	private isCommunityPluginPath(path: string): boolean {
+		const configDir = this.app.vault.configDir;
+		if (!this.settings.syncCommunityPlugins) {
+			return false;
+		}
+
+		if (path === `${configDir}/community-plugins.json`) {
+			return true;
+		}
+
+		return path.startsWith(`${configDir}/plugins/`);
+	}
+
+	private shouldTrackPath(path: string, extensions: Set<string>): boolean {
+		if (this.isCommunityPluginPath(path)) {
+			return true;
+		}
+
+		if (path.startsWith(`${this.app.vault.configDir}/`)) {
 			return false;
 		}
 
@@ -455,8 +474,18 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			return true;
 		}
 
-		const ext = file.extension ? `.${file.extension.toLowerCase()}` : "";
+		const extensionIndex = path.lastIndexOf(".");
+		if (extensionIndex <= path.lastIndexOf("/")) {
+			return false;
+		}
+
+		const ext = path.slice(extensionIndex).toLowerCase();
 		return extensions.has(ext);
+	}
+
+	private shouldIncludeFile(file: TFile, extensions: Set<string>): boolean {
+		const path = normalizePath(file.path);
+		return this.shouldTrackPath(path, extensions);
 	}
 
 	private async buildSnapshot(forceFullUpload = false): Promise<SnapshotResult> {
@@ -504,6 +533,9 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			const deleteTimestamp = Date.now();
 			for (const previousPath of Object.keys(previousEntries)) {
 				if (nextEntries[previousPath]) {
+					continue;
+				}
+				if (!this.shouldTrackPath(previousPath, extensions)) {
 					continue;
 				}
 
@@ -558,15 +590,15 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			return false;
 		}
 
-		if (path.startsWith(`${this.app.vault.configDir}/`)) {
-			return false;
-		}
-
 		const parts = path.split("/");
 		for (const part of parts) {
 			if (!part || part === "." || part === "..") {
 				return false;
 			}
+		}
+
+		if (path.startsWith(`${this.app.vault.configDir}/`)) {
+			return this.isCommunityPluginPath(path);
 		}
 
 		return true;
@@ -753,6 +785,17 @@ class UnraidVaultSyncSettingTab extends PluginSettingTab {
 					.setValue(settings.includeExtensions)
 					.onChange(async (value) => {
 						await this.plugin.updateSettings({ includeExtensions: value.trim() });
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Sync community plugins")
+			.setDesc("Also sync .obsidian/plugins/* and .obsidian/community-plugins.json across devices.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(settings.syncCommunityPlugins)
+					.onChange(async (value) => {
+						await this.plugin.updateSettings({ syncCommunityPlugins: value });
 					}),
 			);
 
