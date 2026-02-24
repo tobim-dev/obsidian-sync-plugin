@@ -76,6 +76,13 @@ interface SnapshotResult {
 	localChanges: SyncChange[];
 }
 
+interface AdapterFileSnapshot {
+	path: string;
+	mtime: number;
+	size: number;
+	content: string;
+}
+
 interface ApplyResult {
 	appliedUpserts: number;
 	appliedDeletes: number;
@@ -488,6 +495,62 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 		return this.shouldTrackPath(path, extensions);
 	}
 
+	private async collectCommunityPluginFiles(): Promise<AdapterFileSnapshot[]> {
+		const results: AdapterFileSnapshot[] = [];
+		if (!this.settings.syncCommunityPlugins) {
+			return results;
+		}
+
+		const configDir = this.app.vault.configDir;
+		await this.maybeCollectAdapterFile(`${configDir}/community-plugins.json`, results);
+		await this.walkAdapterFolder(`${configDir}/plugins`, results);
+
+		results.sort((a, b) => a.path.localeCompare(b.path));
+		return results;
+	}
+
+	private async walkAdapterFolder(folderPath: string, output: AdapterFileSnapshot[]): Promise<void> {
+		const normalizedFolder = normalizePath(folderPath);
+		const listed = await this.app.vault.adapter.list(normalizedFolder).catch(() => null);
+		if (!listed) {
+			return;
+		}
+
+		const files = [...listed.files].sort((a, b) => a.localeCompare(b));
+		for (const filePath of files) {
+			await this.maybeCollectAdapterFile(filePath, output);
+		}
+
+		const folders = [...listed.folders].sort((a, b) => a.localeCompare(b));
+		for (const subFolder of folders) {
+			await this.walkAdapterFolder(subFolder, output);
+		}
+	}
+
+	private async maybeCollectAdapterFile(path: string, output: AdapterFileSnapshot[]): Promise<void> {
+		const normalizedPath = normalizePath(path);
+		if (!this.isCommunityPluginPath(normalizedPath)) {
+			return;
+		}
+
+		const stat = await this.app.vault.adapter.stat(normalizedPath).catch(() => null);
+		if (!stat || stat.type !== "file") {
+			return;
+		}
+
+		const content = await this.app.vault.adapter.read(normalizedPath).catch(() => null);
+		if (typeof content !== "string") {
+			return;
+		}
+
+		output.push({
+			path: normalizedPath,
+			mtime: stat.mtime,
+			size: stat.size,
+			content,
+		});
+	}
+
 	private async buildSnapshot(forceFullUpload = false): Promise<SnapshotResult> {
 		const extensions = this.parseExtensions();
 		const localChanges: SyncChange[] = [];
@@ -525,6 +588,39 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 					mtime: file.stat.mtime,
 					hash,
 					content,
+				});
+			}
+		}
+
+		const processedPaths = new Set<string>(Object.keys(nextEntries));
+		for (const adapterFile of await this.collectCommunityPluginFiles()) {
+			if (processedPaths.has(adapterFile.path)) {
+				continue;
+			}
+
+			const previous = forceFullUpload ? undefined : previousEntries[adapterFile.path];
+			const hash = fnv1aHash(adapterFile.content);
+			const entry: LocalEntry = {
+				path: adapterFile.path,
+				mtime: adapterFile.mtime,
+				size: adapterFile.size,
+				hash,
+			};
+			nextEntries[adapterFile.path] = entry;
+
+			if (
+				forceFullUpload ||
+				!previous ||
+				previous.hash !== hash ||
+				previous.mtime !== adapterFile.mtime ||
+				previous.size !== adapterFile.size
+			) {
+				localChanges.push({
+					op: "upsert",
+					path: adapterFile.path,
+					mtime: adapterFile.mtime,
+					hash,
+					content: adapterFile.content,
 				});
 			}
 		}
@@ -638,9 +734,13 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			const safePath = rawChange.path;
 
 			if (rawChange.op === "delete") {
-				const existing = this.app.vault.getAbstractFileByPath(safePath);
-				if (existing instanceof TFile) {
-					await this.app.vault.delete(existing);
+				if (this.isCommunityPluginPath(safePath)) {
+					await this.app.vault.adapter.remove(safePath).catch(() => undefined);
+				} else {
+					const existing = this.app.vault.getAbstractFileByPath(safePath);
+					if (existing instanceof TFile) {
+						await this.app.vault.delete(existing);
+					}
 				}
 				delete entryMap[safePath];
 				appliedDeletes += 1;
@@ -653,8 +753,47 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 			}
 
 			const hash = rawChange.hash ?? fnv1aHash(rawChange.content);
-			const current = this.app.vault.getAbstractFileByPath(safePath);
+			if (this.isCommunityPluginPath(safePath)) {
+				const currentStat = await this.app.vault.adapter.stat(safePath).catch(() => null);
+				if (currentStat?.type === "file") {
+					const currentContent = await this.app.vault.adapter.read(safePath).catch(() => null);
+					if (typeof currentContent === "string") {
+						const currentHash = fnv1aHash(currentContent);
+						if (currentHash === hash) {
+							entryMap[safePath] = {
+								path: safePath,
+								mtime: currentStat.mtime,
+								size: currentStat.size,
+								hash,
+							};
+							continue;
+						}
 
+						if (currentStat.mtime > syncStartedAt) {
+							skipped += 1;
+							continue;
+						}
+					}
+				}
+
+				await this.ensureParentFolders(safePath);
+				await this.app.vault.adapter.write(safePath, rawChange.content);
+				const updatedStat = await this.app.vault.adapter.stat(safePath).catch(() => null);
+				if (updatedStat?.type === "file") {
+					entryMap[safePath] = {
+						path: safePath,
+						mtime: updatedStat.mtime,
+						size: updatedStat.size,
+						hash,
+					};
+					appliedUpserts += 1;
+				} else {
+					skipped += 1;
+				}
+				continue;
+			}
+
+			const current = this.app.vault.getAbstractFileByPath(safePath);
 			if (current instanceof TFile) {
 				const currentContent = await this.app.vault.cachedRead(current);
 				const currentHash = fnv1aHash(currentContent);
@@ -673,7 +812,6 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 					skipped += 1;
 					continue;
 				}
-
 				await this.app.vault.modify(current, rawChange.content);
 			} else {
 				await this.ensureParentFolders(safePath);
@@ -705,6 +843,24 @@ export default class UnraidVaultSyncPlugin extends Plugin {
 		const parts = path.split("/");
 		parts.pop();
 		if (parts.length === 0) {
+			return;
+		}
+
+		if (this.isCommunityPluginPath(path)) {
+			let current = "";
+			for (const part of parts) {
+				current = current ? `${current}/${part}` : part;
+				const exists = await this.app.vault.adapter.exists(current).catch(() => false);
+				if (exists) {
+					continue;
+				}
+				await this.app.vault.adapter.mkdir(current).catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					if (!message.includes("exists")) {
+						throw error;
+					}
+				});
+			}
 			return;
 		}
 
